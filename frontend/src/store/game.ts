@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { BoardState, Move, GameRecord, AIConfig, GameStatus } from '../types';
+import type { BoardState, Move, GameRecord, AIConfig, GameStatus, Room, Player, CurrentUser, AppView } from '../types';
 
 const BOARD_SIZE = 15;
 const EMPTY = 0;
@@ -191,6 +191,17 @@ function getAIMove(board: BoardState, aiPlayer: number, depth: number): [number,
 
 // --- Store ---
 
+const API_BASE = 'http://localhost:8080/api/game';
+
+function generateUserId(): string {
+  let id = localStorage.getItem('gobang_user_id');
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem('gobang_user_id', id);
+  }
+  return id;
+}
+
 export const useGameStore = defineStore('game', () => {
   const board = ref<BoardState>(createEmptyBoard());
   const currentPlayer = ref<number>(BLACK);
@@ -208,8 +219,218 @@ export const useGameStore = defineStore('game', () => {
   const isReplayPlaying = ref(false);
   const replaySpeed = ref(1000);
 
+  // Room System
+  const currentUser = ref<CurrentUser>({
+    id: generateUserId(),
+    name: localStorage.getItem('gobang_user_name') || '玩家' + Math.floor(Math.random() * 1000),
+  });
+  const currentView = ref<AppView>('lobby');
+  const rooms = ref<Room[]>([]);
+  const currentRoom = ref<Room | null>(null);
+  const roomPollTimer = ref<ReturnType<typeof setInterval> | null>(null);
+  const roomError = ref<string | null>(null);
+
   const currentMoveCount = computed(() => moves.value.length);
   const isGameOver = computed(() => status.value === 'finished');
+
+  // Room computed
+  const isRoomOwner = computed(() =>
+    currentRoom.value?.ownerId === currentUser.value.id
+  );
+  const currentPlayerInRoom = computed((): Player | undefined =>
+    currentRoom.value?.players.find(p => p.id === currentUser.value.id)
+  );
+  const allPlayersReady = computed(() =>
+    currentRoom.value?.players.length === 2 &&
+    currentRoom.value.players.every(p => p.isReady)
+  );
+  const canStartGame = computed(() =>
+    isRoomOwner.value && allPlayersReady.value
+  );
+  const myColor = computed((): number | null =>
+    currentPlayerInRoom.value?.color || null
+  );
+
+  // Room methods
+  async function fetchRooms() {
+    try {
+      const res = await fetch(`${API_BASE}/room/list`);
+      if (res.ok) {
+        rooms.value = await res.json();
+      }
+    } catch (e) {
+      console.error('Failed to fetch rooms:', e);
+    }
+  }
+
+  async function createRoom(roomName: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/room/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: currentUser.value.id,
+          playerName: currentUser.value.name,
+          roomName,
+        }),
+      });
+      if (res.ok) {
+        currentRoom.value = await res.json();
+        currentView.value = 'room';
+        startRoomPolling();
+        return true;
+      }
+      roomError.value = await res.text();
+      return false;
+    } catch (e) {
+      roomError.value = '创建房间失败';
+      return false;
+    }
+  }
+
+  async function joinRoom(roomId: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/room/${roomId}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: currentUser.value.id,
+          playerName: currentUser.value.name,
+        }),
+      });
+      if (res.ok) {
+        currentRoom.value = await res.json();
+        currentView.value = 'room';
+        startRoomPolling();
+        return true;
+      }
+      roomError.value = await res.text();
+      return false;
+    } catch (e) {
+      roomError.value = '加入房间失败';
+      return false;
+    }
+  }
+
+  async function leaveRoom(): Promise<boolean> {
+    if (!currentRoom.value) return false;
+    try {
+      const res = await fetch(`${API_BASE}/room/${currentRoom.value.id}/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: currentUser.value.id }),
+      });
+      stopRoomPolling();
+      currentRoom.value = null;
+      currentView.value = 'lobby';
+      if (status.value === 'playing') {
+        status.value = 'idle';
+      }
+      return res.ok;
+    } catch (e) {
+      stopRoomPolling();
+      currentRoom.value = null;
+      currentView.value = 'lobby';
+      return false;
+    }
+  }
+
+  async function setReady(ready: boolean): Promise<boolean> {
+    if (!currentRoom.value) return false;
+    try {
+      const res = await fetch(`${API_BASE}/room/${currentRoom.value.id}/ready`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: currentUser.value.id,
+          ready,
+        }),
+      });
+      if (res.ok) {
+        currentRoom.value = await res.json();
+        return true;
+      }
+      roomError.value = await res.text();
+      return false;
+    } catch (e) {
+      roomError.value = '操作失败';
+      return false;
+    }
+  }
+
+  async function startRoomGame(): Promise<boolean> {
+    if (!currentRoom.value || !canStartGame.value) return false;
+    try {
+      const res = await fetch(`${API_BASE}/room/${currentRoom.value.id}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: currentUser.value.id }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        currentRoom.value = data.room;
+        board.value = createEmptyBoard();
+        currentPlayer.value = BLACK;
+        moves.value = [];
+        status.value = 'playing';
+        winner.value = null;
+        isAiThinking.value = false;
+        aiConfig.value.enabled = false;
+        return true;
+      }
+      roomError.value = await res.text();
+      return false;
+    } catch (e) {
+      roomError.value = '开始游戏失败';
+      return false;
+    }
+  }
+
+  async function refreshRoom() {
+    if (!currentRoom.value) return;
+    try {
+      const res = await fetch(`${API_BASE}/room/${currentRoom.value.id}`);
+      if (res.ok) {
+        currentRoom.value = await res.json();
+      }
+    } catch (e) {
+      console.error('Failed to refresh room:', e);
+    }
+  }
+
+  function startRoomPolling() {
+    stopRoomPolling();
+    roomPollTimer.value = setInterval(() => {
+      refreshRoom();
+    }, 2000);
+  }
+
+  function stopRoomPolling() {
+    if (roomPollTimer.value) {
+      clearInterval(roomPollTimer.value);
+      roomPollTimer.value = null;
+    }
+  }
+
+  function setUserName(name: string) {
+    currentUser.value.name = name;
+    localStorage.setItem('gobang_user_name', name);
+  }
+
+  function switchToSoloMode() {
+    leaveRoom();
+    currentView.value = 'solo';
+  }
+
+  function switchToLobby() {
+    if (status.value === 'playing') {
+      status.value = 'idle';
+    }
+    stopRoomPolling();
+    currentRoom.value = null;
+    currentView.value = 'lobby';
+    aiConfig.value.enabled = true;
+  }
 
   function startGame() {
     board.value = createEmptyBoard();
@@ -359,6 +580,10 @@ export const useGameStore = defineStore('game', () => {
     board, currentPlayer, moves, status, winner, gameRecords, aiConfig, isAiThinking,
     replayMoves, replayIndex, replayBoard, isReplayPlaying, replaySpeed,
     currentMoveCount, isGameOver,
+    currentUser, currentView, rooms, currentRoom, roomError,
+    isRoomOwner, currentPlayerInRoom, allPlayersReady, canStartGame, myColor,
+    fetchRooms, createRoom, joinRoom, leaveRoom, setReady, startRoomGame,
+    refreshRoom, setUserName, switchToSoloMode, switchToLobby,
     startGame, placeStone, aiMove, saveRecord,
     startReplay, replayStepForward, replayStepBack, replayGoToStart, replayGoToEnd,
     toggleReplayPlay, setReplaySpeed, stopReplay, checkWin,

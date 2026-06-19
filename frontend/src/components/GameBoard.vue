@@ -116,6 +116,10 @@ function handleClick(e: MouseEvent) {
   if (store.status !== 'playing') return;
   if (store.aiConfig.enabled && store.currentPlayer === store.aiConfig.playerColor) return;
 
+  if (store.currentView === 'room' && store.myColor !== null) {
+    if (store.currentPlayer !== store.myColor) return;
+  }
+
   const canvas = canvasRef.value;
   if (!canvas) return;
 

@@ -22,3 +22,30 @@ export interface AIConfig {
 }
 
 export type GameStatus = 'idle' | 'playing' | 'finished' | 'replaying';
+
+export interface Player {
+  id: string;
+  name: string;
+  isReady: boolean;
+  color: number | null; // 1=black, 2=white, null=not assigned
+}
+
+export type RoomStatus = 'WAITING' | 'PREPARING' | 'PLAYING' | 'FINISHED';
+
+export interface Room {
+  id: string;
+  name: string;
+  ownerId: string;
+  players: Player[];
+  status: RoomStatus;
+  gameId: string | null;
+  maxPlayers: number;
+  createdAt: number;
+}
+
+export interface CurrentUser {
+  id: string;
+  name: string;
+}
+
+export type AppView = 'lobby' | 'room' | 'solo';
